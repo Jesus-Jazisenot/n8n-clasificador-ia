@@ -37,7 +37,10 @@ El negocio ficticio **Climas del Pacífico** (el mismo de DocuCita) recibe mucho
 [1. Llega el mensaje]
         |
 [2. Gemini lo clasifica]
-        |
+   |-- falla --> [2b. Gemini de respaldo]
+   |                |-- falla --> [2c. Sin IA: pasar a humano] --> [6. Contestar]
+   |<-- funciona ---+
+   |
 [3. Leer lo que dijo la IA]
         |
 [4. ¿Es urgente?]
@@ -62,11 +65,21 @@ En palabras: **llega un mensaje → la IA dice de qué trata, si es urgente y re
 - **Truco clave: respuesta en JSON con esquema.** Le pedimos a Gemini que conteste SOLO con `{categoria, urgente, respuesta}` y le damos la lista de categorías permitidas. Así la IA no puede contestar con un rollo: siempre devuelve los mismos 3 campos, y los siguientes nodos pueden usarlos.
 - **Reglas anti-inventos:** el prompt dice "NO inventes precios ni fechas; si hace falta, di que un asesor confirma". Es la misma idea que DocuCita: mejor admitir que no sabes que inventar.
 - **Por qué HTTP Request y no un nodo "de IA" ya hecho:** porque con HTTP Request le hablas a CUALQUIER API. Si mañana cambias a OpenAI o Claude, cambias la dirección y listo. Además aprendes cómo funcionan las APIs por dentro.
-- **Reintentos:** si Gemini falla (pasa seguido en el plan gratis: "modelo saturado"), el nodo reintenta 3 veces esperando 5 segundos.
+- **Reintentos:** si Gemini falla (pasa seguido en el plan gratis: "modelo saturado"), el nodo reintenta una vez más (2 intentos, 20 s máximo cada uno). Si aun así falla, entra el plan B (nodo 2b).
+
+### Nodos 2b y 2c — el plan B y el plan C (agregados después de ver fallar a Gemini)
+Probando el flujo, Gemini contestó **"Service unavailable" (503)**: el modelo gratis estaba saturado y el flujo se caía con "Error in workflow". Un cliente real se habría quedado sin respuesta. Por eso:
+- **Nodo 2 tiene dos salidas.** En *Settings → On Error* se puso **"Continue (using error output)"**: si se acaban sus reintentos, en vez de tronar manda el mensaje por una segunda salida llamada *Error*.
+- **2b. Gemini de respaldo:** es una copia del nodo 2 pero con **otro modelo** (`gemini-3.5-flash-lite`, variable `GEMINI_FALLBACK_MODEL`). Como un plan B: si un modelo está saturado, muchas veces el otro no.
+- **2c. Sin IA: pasar a humano:** si el respaldo TAMBIÉN falla, un nodo Set arma una respuesta fija ("recibimos tu mensaje, un asesor te contacta en unos minutos") y marca el mensaje para una persona. **El cliente siempre recibe respuesta.**
+- **Tiempos más cortos:** cada intento espera máximo 20 s y cada modelo tiene 2 intentos. Antes eran 60 s × 3 y una prueba tardó más de 2 minutos en fallar; en un chat eso es eterno.
+- **Truco importante:** la salida de error NO trae el mensaje original, trae la información del error. Por eso los nodos 2, 2b y 2c leen el mensaje directo del nodo 1 con `$('1. Llega el mensaje').first().json.body`.
+- A esto se le llama **degradación elegante** (*graceful degradation*): si algo falla, el sistema sigue funcionando aunque sea de forma más simple.
 
 ### Nodo 3 — "Leer lo que dijo la IA" (Code)
 - **Qué hace:** Gemini devuelve su JSON como texto metido en `candidates[0].content.parts[0].text`. Este nodo lo saca, lo convierte en campos de verdad (`JSON.parse`) y lo junta con el nombre y el mensaje original.
-- **Por qué:** para que los siguientes nodos puedan preguntar `{{ $json.urgente }}` directamente. Es el único pedacito con código (8 líneas de JavaScript).
+- **Por qué:** para que los siguientes nodos puedan preguntar `{{ $json.urgente }}` directamente. Es el único pedacito con código (unas 15 líneas de JavaScript).
+- **Además** agrega el campo `modelo` (`principal` o `respaldo`) usando `$('2b. Gemini de respaldo').isExecuted`, para saber en cada respuesta qué modelo contestó.
 
 ### Nodo 4 — "¿Es urgente?" (IF)
 - **Qué hace:** una pregunta de sí o no: ¿`urgente` es verdadero? Tiene dos salidas: **true** (arriba) y **false** (abajo).
@@ -121,7 +134,16 @@ En palabras: **llega un mensaje → la IA dice de qué trata, si es urgente y re
 
 Los 3 casos cayeron en la categoría correcta y por el camino correcto.
 
+### Pruebas del plan B y plan C (25-sep-2026, tarde)
+Para probar que el respaldo sirve de verdad, se arrancó n8n **a propósito con modelos que no existen** (`.\iniciar_n8n.ps1 -Modelo no-existe -Recrear`):
+- **Principal roto, respaldo bien:** Rosa preguntó cuánto cuesta revisar un minisplit que no enfría → categoría **cotizacion**, respuesta de la IA, `modelo: respaldo`. El flujo no se cayó.
+- **Los dos rotos:** respuesta en **13 segundos**: "Hola Rosa, recibimos tu mensaje. Un asesor te contacta en unos minutos." → `accion: PASAR A UN HUMANO (la IA no respondió)`.
+- **Todo normal otra vez:** Ana, Carlos y Lupita salieron igual que en la mañana.
+- Extra: "se me está goteando agua del minisplit sobre el contacto de la luz" → **garantía, urgente**, pasa a humano.
+
 ### Problemas que me encontré (y cómo se arreglaron) — esto también se cuenta en entrevista
+- **Gemini 503 "Service unavailable":** el flujo se caía. Se agregaron el nodo de respaldo (2b), la red de seguridad sin IA (2c) y tiempos más cortos. Ver arriba.
+- **La lista de Executions salía vacía:** solo no había cargado; al recargar aparecen todas. Cada ejecución (verde = bien, roja = error) se puede abrir y ver qué pasó en cada nodo.
 - **"NOT NULL constraint failed: workflow_entity.id" al importar:** n8n 2.x exige que el archivo del flujo traiga un `id`. Se agregó `"id": "ClasificadorIA01"`.
 - **Activar por consola:** en n8n 2.x ya no es `update:workflow --active=true` sino `n8n publish:workflow --id=...` y reiniciar n8n.
 - **Acentos raros en la consola:** PowerShell 5 lee los scripts sin BOM como si no fueran UTF-8; se guardaron con BOM.
@@ -132,10 +154,12 @@ Los 3 casos cayeron en la categoría correcta y por el camino correcto.
 ## 7. Cómo explicarlo en la entrevista
 
 ### En español (30 segundos)
-"Hice un flujo en n8n que atiende mensajes de clientes de un negocio de climas. Llega el mensaje por un webhook, Gemini lo clasifica con una respuesta en JSON con esquema fijo —categoría, si es urgente y un borrador de respuesta—, y un IF decide: si es urgente, como un equipo echando chispas, lo pasa a una persona con un mensaje de seguridad fijo; si no, contesta automático. La llave de la API va en variables de entorno, el nodo HTTP tiene reintentos y en Executions se ve el camino de cada mensaje."
+"Hice un flujo en n8n que atiende mensajes de clientes de un negocio de climas. Llega el mensaje por un webhook, Gemini lo clasifica con una respuesta en JSON con esquema fijo —categoría, si es urgente y un borrador de respuesta—, y un IF decide: si es urgente, como un equipo echando chispas, lo pasa a una persona con un mensaje de seguridad fijo; si no, contesta automático. Si Gemini falla, que me pasó con errores 503, el mensaje se va a un modelo de respaldo, y si ese también falla se contesta con un mensaje fijo y pasa a una persona: el cliente nunca se queda sin respuesta. La llave de la API va en variables de entorno y en Executions se ve el camino de cada mensaje."
 
 ### In English (practice this one out loud)
-"I built an n8n workflow that triages customer messages for an air-conditioning business. A webhook receives the message, Gemini classifies it using structured JSON output — category, whether it's urgent, and a draft reply — and an IF node routes it: urgent cases, like a unit sparking, go to a human with a fixed safety message; everything else gets an automatic reply. The API key lives in environment variables, the HTTP node retries on errors, and I can see every run in the Executions tab."
+"I built an n8n workflow that triages customer messages for an air-conditioning business. A webhook receives the message, Gemini classifies it using structured JSON output — category, whether it's urgent, and a draft reply — and an IF node routes it: urgent cases, like a unit sparking, go to a human with a fixed safety message; everything else gets an automatic reply. When Gemini returned 503 errors, I added a fallback: the node's error output sends the message to a second model, and if that one fails too, the customer gets a fixed reply and a human takes over — so nobody is left without an answer. I tested it by breaking the models on purpose. The API key lives in environment variables, and I can see every run in the Executions tab."
+
+Palabras nuevas: *fallback model, error output, graceful degradation, timeout*.
 
 Palabras en inglés útiles: *workflow, node, trigger, webhook, structured output, routing, branch, retry, human in the loop, self-hosted*.
 
@@ -145,7 +169,7 @@ Palabras en inglés útiles: *workflow, node, trigger, webhook, structured outpu
 
 - **¿Por qué pediste JSON con esquema?** Porque si la IA contesta texto libre, cada vez sale distinto y el IF no sabría qué leer. Con esquema siempre llegan los mismos campos.
 - **¿Qué pasa si la IA se equivoca y dice "no urgente" en algo urgente?** Es el riesgo principal. Mejoras: una regla extra sin IA (si el texto dice "chispas", "humo" o "quemado", urgente sí o sí), y revisar las ejecuciones para medir cuántas veces acierta —como hice con la evaluación de DocuCita—.
-- **¿Qué pasa si Gemini no responde?** El nodo reintenta 3 veces. En producción agregaría un *Error Workflow* que avise a una persona.
+- **¿Qué pasa si Gemini no responde?** Me pasó de verdad (503). El nodo reintenta; si sigue fallando, su salida de error manda el mensaje a otro modelo; y si ese también falla, se contesta con un mensaje fijo y se pasa a una persona. Lo probé apagando los modelos a propósito. En producción además agregaría un *Error Workflow* que me avise.
 - **¿n8n vs Make vs Zapier?** Los tres unen apps con cajitas. Zapier es el más fácil pero caro por tarea; Make es visual y barato, bueno para escenarios con ramas; n8n es open source y *self-hosted*, así que puedes correrlo en tu servidor, meter código cuando haga falta y no pagas por ejecución.
 - **¿Cómo lo conectarías a WhatsApp?** Cambiando el trigger por el de WhatsApp Business (o que el bot de WhatsApp llame a este webhook) y agregando al final un nodo que mande la respuesta por WhatsApp.
 

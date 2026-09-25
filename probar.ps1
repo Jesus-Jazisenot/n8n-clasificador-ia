@@ -14,7 +14,7 @@ foreach ($m in $mensajes) {
     $body = $m | ConvertTo-Json -Compress
     $r = Invoke-RestMethod -Uri $url -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8'
     Write-Host "`n>> $($m.nombre): $($m.mensaje)" -ForegroundColor Cyan
-    Write-Host "   categoría: $($r.categoria) | urgente: $($r.urgente) | acción: $($r.accion)"
+    Write-Host "   categoría: $($r.categoria) | urgente: $($r.urgente) | acción: $($r.accion) | modelo: $($r.modelo)"
     Write-Host "   respuesta: $($r.respuesta)" -ForegroundColor Green
     Start-Sleep 5
 }

@@ -8,6 +8,10 @@ A message arrives on a webhook → Gemini classifies it with **structured JSON o
 flowchart LR
     W[1. Webhook<br/>POST /mensaje-cliente] --> G[2. HTTP Request<br/>Gemini, JSON schema]
     G --> C[3. Code<br/>parse the AI's JSON]
+    G -- error --> B[2b. Fallback model]
+    B --> C
+    B -- error --> N[2c. No AI: fixed reply,<br/>hand off to a human]
+    N --> R
     C --> I{4. Urgent?}
     I -- yes --> H[5a. Hand off to a human<br/>fixed safety reply]
     I -- no --> A[5b. Automatic reply]
@@ -20,7 +24,8 @@ flowchart LR
 - **Structured output instead of free text.** Gemini must answer `{categoria, urgente, respuesta}` with an enum of allowed categories, so the IF node always has a field to read.
 - **No invented facts.** The prompt forbids making up prices or dates; the reply says an advisor will confirm them.
 - **Human in the loop for risky cases.** Urgent messages never get an AI-written answer: the text is fixed by the business.
-- **Plain HTTP Request node.** Any LLM API can be swapped in by changing the URL; the node retries 3× on errors (the free tier returns 503s often).
+- **Plain HTTP Request node.** Any LLM API can be swapped in by changing the URL.
+- **Graceful degradation.** The free tier returns 503s often (it happened while testing). Each model gets 2 tries of 20 s; then the node's *error output* sends the message to a fallback model (`GEMINI_FALLBACK_MODEL`), and if that fails too, a fixed reply goes out and a human takes over. Tested by starting n8n with non-existent model names: fallback only → answered by the fallback; both broken → fixed reply in 13 s. The response's `modelo` field says which path answered.
 - **No secrets in the workflow.** The API key and model come from environment variables (`$env.GEMINI_API_KEY`, `$env.GEMINI_MODEL`).
 
 ## Results (n8n 2.40.7, `gemini-flash-lite-latest`)
@@ -37,6 +42,7 @@ Requires Docker and a Gemini API key.
 
 ```powershell
 .\iniciar_n8n.ps1          # starts n8n on http://localhost:5678 (reads GEMINI_API_KEY from ..\docucita\.env)
+                           # -Modelo / -Respaldo pick the models, -Recrear recreates the container (data survives in the n8n_data volume)
 docker cp clasificador_mensajes.json n8n:/tmp/flujo.json
 docker exec n8n n8n import:workflow --input=/tmp/flujo.json
 docker exec n8n n8n publish:workflow --id=ClasificadorIA01

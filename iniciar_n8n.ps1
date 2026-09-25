@@ -1,16 +1,26 @@
 ﻿# Arranca n8n en Docker (http://localhost:5678) con la llave de Gemini de docucita.
 # La llave se pasa como variable de entorno: nunca queda escrita dentro del flujo.
+# -Modelo cambia el modelo principal; el de respaldo entra solo si el principal falla (503 / sin cuota).
+# -Recrear borra el contenedor y lo crea de nuevo (para cambiar variables); los datos viven en el volumen n8n_data.
+param(
+    [string]$Modelo = 'gemini-flash-lite-latest',
+    [string]$Respaldo = 'gemini-3.5-flash-lite',
+    [switch]$Recrear
+)
 $linea = Select-String -Path "$env:USERPROFILE\docucita\.env" -Pattern '^GEMINI_API_KEY=' | Select-Object -First 1
 if (-not $linea) { Write-Error "No encontré GEMINI_API_KEY en docucita\.env"; exit 1 }
 $key = $linea.Line.Split('=', 2)[1].Trim().Trim('"')
 
-if (docker ps -a --format '{{.Names}}' | Select-String -Quiet '^n8n$') {
+$existe = docker ps -a --format '{{.Names}}' | Select-String -Quiet '^n8n$'
+if ($existe -and $Recrear) { docker rm -f n8n | Out-Null; $existe = $false }
+if ($existe) {
     docker start n8n | Out-Null
 } else {
     docker run -d --name n8n -p 5678:5678 `
         -v n8n_data:/home/node/.n8n `
         -e GEMINI_API_KEY=$key `
-        -e GEMINI_MODEL=gemini-flash-lite-latest `
+        -e GEMINI_MODEL=$Modelo `
+        -e GEMINI_FALLBACK_MODEL=$Respaldo `
         -e N8N_BLOCK_ENV_ACCESS_IN_NODE=false `
         -e GENERIC_TIMEZONE=America/Mazatlan -e TZ=America/Mazatlan `
         docker.n8n.io/n8nio/n8n:latest | Out-Null
